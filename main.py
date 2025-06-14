@@ -1,7 +1,7 @@
 import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta, time
@@ -118,7 +118,6 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
     date_range = parse_date_query(query)
     time_range = parse_time_of_day_query(query)
     
-    # Identify location keywords ONLY if not part of a distance query
     location_keywords = []
     if not distance_params:
         location_keywords = [loc for loc in known_locations if loc in query_lower]
@@ -128,7 +127,6 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
     for row in data:
         is_match = True
 
-        # Apply Date Filter
         if date_range:
             sale_date_str = row.get("SaleDate")
             if not sale_date_str: is_match = False
@@ -139,7 +137,6 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
                 except (ValueError, TypeError): is_match = False
         if not is_match: continue
 
-        # Apply Time of Day Filter
         if time_range:
             sale_time_str = row.get("SaleTime")
             if not sale_time_str: is_match = False
@@ -150,7 +147,6 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
                 except (ValueError, TypeError): is_match = False
         if not is_match: continue
 
-        # Apply Distance Filter
         if distance_params:
             max_dist, min_dist, target_coords = distance_params
             address = f"{row.get('PropertyAddress', '')}, {row.get('City', '')}, TN"
@@ -162,14 +158,12 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
                 if min_dist is not None and dist < min_dist: is_match = False
         if not is_match: continue
 
-        # Apply Location Keyword Filter
         if location_keywords:
             row_loc_text = f"{row.get('City', '')} {row.get('County', '')}".lower()
             if not any(loc in row_loc_text for loc in location_keywords):
                 is_match = False
         if not is_match: continue
         
-        # If no specific filters were found, do a simple text search
         if not any([distance_params, date_range, time_range, location_keywords]):
              if query_lower not in " ".join(str(v).lower() for v in row.values()):
                  is_match = False
@@ -177,4 +171,23 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
 
         results.append(row)
 
-    return [Property(**r) for r in results]
+    # --- Step 3: Format and Validate the final results ---
+    validated_results = []
+    for r in results:
+        try:
+            # Explicitly cast all values to string to match the Pydantic model and prevent errors.
+            property_instance = Property(
+                PropertyAddress=str(r.get("PropertyAddress", "")),
+                SaleDate=str(r.get("SaleDate", "")),
+                SaleTime=str(r.get("SaleTime", "")),
+                City=str(r.get("City", "")),
+                County=str(r.get("County", "")),
+                ZipCode=str(r.get("ZipCode", "")),
+                Source=str(r.get("Source", ""))
+            )
+            validated_results.append(property_instance)
+        except ValidationError as e:
+            # This will log if a row has fundamentally invalid data that even casting can't fix.
+            print(f"Skipping row due to validation error: {r} -> {e}")
+
+    return validated_results
