@@ -1,82 +1,59 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from pydantic import BaseModel
 import gspread
-from google.oauth2.service_account import Credentials
-import math
-from geopy.distance import geodesic
-
-# Google Sheets authentication
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-creds = Credentials.from_service_account_file("credentials2.json", scopes=SCOPES)
-gc = gspread.authorize(creds)
-
-# Sheet setup
-SHEET_NAME = "Foreclosure Deals"
-WORKSHEET_NAME = "Sheet1"
-
-worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-
-# Load worksheet values
-records = worksheet.get_all_records()
-
-# Static coordinates for reference points
-REFERENCE_POINTS = {
-    "Mt. Juliet": (36.2006, -86.5186),
-    "Nashville": (36.1627, -86.7816),
-}
-
-
-def calculate_drive_time(address: str, reference_coords: tuple) -> float:
-    # In real implementation, you'd use Google Maps API
-    # Here we simulate drive time as 1.3x straight-line distance (in miles) converted to minutes
-    try:
-        from geopy.geocoders import Nominatim
-        geolocator = Nominatim(user_agent="foreclosure-finder")
-        location = geolocator.geocode(address)
-        if location:
-            address_coords = (location.latitude, location.longitude)
-            miles = geodesic(reference_coords, address_coords).miles
-            return round(miles * 1.3)  # Approximate drive time in minutes
-        else:
-            return math.inf
-    except Exception:
-        return math.inf
-
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = FastAPI()
 
-# Allow requests from any origin (CORS)
+# CORS (so GPT can call it)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Google Sheets setup
+SHEET_NAME = "Foreclosure Deals"
+WORKSHEET_NAME = "Sheet1"
+CREDENTIALS_FILE = "credentials2.json"  # Update if renamed
 
-@app.get("/get_properties")
-def get_properties(
-    location: str = Query(..., description="City name (e.g., 'Mt. Juliet')"),
-    max_drive_time: int = Query(..., description="Maximum drive time in minutes")
-) -> List[dict]:
-    if location not in REFERENCE_POINTS:
-        return {"error": f"Location '{location}' is not supported."}
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+gc = gspread.authorize(creds)
 
-    reference_coords = REFERENCE_POINTS[location]
-    filtered_properties = []
+# Request model
+class QueryRequestModel(BaseModel):
+    query: str
 
-    for row in records:
-        address = row.get("Property Address")
-        if not address:
-            continue
+# Response model
+class Property(BaseModel):
+    address: str
+    city: str
+    state: str
+    zip_code: str
+    price: str
 
-        drive_time = calculate_drive_time(address, reference_coords)
-        if drive_time <= max_drive_time:
-            row["Drive Time (min)"] = drive_time
-            filtered_properties.append(row)
+@app.post("/query_foreclosure_sheet")
+def query_foreclosure_sheet(payload: QueryRequestModel):
+    query = payload.query.lower()
+    
+    # Load the sheet
+    worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
+    data = worksheet.get_all_records()
 
-    return filtered_properties
+    results = []
+    for row in data:
+        row_text = " ".join([str(v).lower() for v in row.values()])
+        if query in row_text:
+            results.append({
+                "address": row.get("Address", ""),
+                "city": row.get("City", ""),
+                "state": row.get("State", ""),
+                "zip_code": row.get("Zip Code", ""),
+                "price": row.get("Price", ""),
+            })
+
+    return results  # Always return a list, even if empty
