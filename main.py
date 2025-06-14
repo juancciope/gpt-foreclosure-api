@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 app = FastAPI()
 
@@ -21,7 +21,7 @@ WORKSHEET_NAME = "Sheet1"
 CREDENTIALS_FILE = "credentials2.json"  # Update if renamed
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+credentials = Credentials.from_service_account_file("credentials2.json", scopes=scope)
 gc = gspread.authorize(creds)
 
 # Request model
