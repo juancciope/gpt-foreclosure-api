@@ -41,7 +41,7 @@ class Property(BaseModel):
 @app.post("/query_foreclosure_sheet", response_model=list[Property])
 def query_foreclosure_sheet(payload: QueryRequestModel):
     query = payload.query.lower()
-    
+
     worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
     data = worksheet.get_all_records()
 
@@ -50,13 +50,13 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
         row_text = " ".join([str(v).lower() for v in row.values()])
         if query in row_text:
             results.append({
-                "PropertyAddress": row.get("PropertyAddress", ""),
-                "SaleDate": row.get("SaleDate", ""),
-                "SaleTime": row.get("SaleTime", ""),
-                "City": row.get("City", ""),
-                "County": row.get("County", ""),
-                "ZipCode": str(row.get("ZipCode", "")),  # ensure it's always a string
-                "Source": row.get("Source", "")
+                "PropertyAddress": str(row["PropertyAddress"]) if row.get("PropertyAddress") else "",
+                "SaleDate": str(row["SaleDate"]) if row.get("SaleDate") else "",
+                "SaleTime": str(row["SaleTime"]) if row.get("SaleTime") else "",
+                "City": str(row["City"]) if row.get("City") else "",
+                "County": str(row["County"]) if row.get("County") else "",
+                "ZipCode": str(row["ZipCode"]) if row.get("ZipCode") else "",
+                "Source": str(row["Source"]) if row.get("Source") else "",
             })
 
     return results
