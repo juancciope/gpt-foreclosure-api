@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
@@ -12,24 +12,16 @@ from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
 app = FastAPI()
 
 # --- Configuration ---
-# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
-
-# Google Sheets Configuration
 SHEET_NAME = "Foreclosure Deals"
 WORKSHEET_NAME = "Sheet1"
 CREDENTIALS_FILE = "credentials2.json"
 
 # --- Services and Caching ---
-# Initialize geolocator (Nominatim is free and doesn't require an API key)
-geolocator = Nominatim(user_agent="foreclosure_finder_app")
-# Cache for storing coordinates of already looked-up locations to speed up requests
+geolocator = Nominatim(user_agent="foreclosure_finder_app_v3")
 geocode_cache = {}
 
 # --- Google Sheets Connection ---
@@ -55,136 +47,132 @@ class Property(BaseModel):
     ZipCode: str
     Source: str
 
-# --- Helper Functions ---
+# --- Smart Parsing Helper Functions ---
 
-def get_coords(location_str: str):
-    """Geocodes a location string and caches the result."""
-    if location_str in geocode_cache:
-        return geocode_cache[location_str]
+def get_coords(location_str: str, row_context=None):
+    normalized_location = location_str.strip().lower()
+    if normalized_location in geocode_cache:
+        return geocode_cache[normalized_location]
+    coords = None
     try:
-        location = geolocator.geocode(location_str)
+        location = geolocator.geocode(normalized_location, timeout=5)
         if location:
             coords = (location.latitude, location.longitude)
-            geocode_cache[location_str] = coords
-            return coords
+        elif row_context:
+            for fallback_key in ['City', 'ZipCode']:
+                fallback_val = row_context.get(fallback_key)
+                if fallback_val:
+                    fallback_str = str(fallback_val).lower()
+                    if fallback_str in geocode_cache: return geocode_cache[fallback_str]
+                    fallback_loc = geolocator.geocode(fallback_str, timeout=5)
+                    if fallback_loc:
+                        coords = (fallback_loc.latitude, fallback_loc.longitude)
+                        geocode_cache[fallback_str] = coords
+                        break # Found a fallback, stop trying
     except (GeocoderTimedOut, GeocoderUnavailable):
-        print(f"Geocoding service timed out for: {location_str}")
+        print(f"Geocoding service timed out for: {normalized_location}")
     except Exception as e:
-        print(f"An error occurred during geocoding for {location_str}: {e}")
-    
-    geocode_cache[location_str] = None # Cache failure to avoid retrying
-    return None
+        print(f"An error occurred during geocoding for {normalized_location}: {e}")
+    geocode_cache[normalized_location] = coords
+    return coords
 
 def parse_date_query(query: str):
-    """Parses relative date queries like 'today' or 'next week'."""
     today = datetime.now().date()
-    query = query.strip().lower()
-    if query == "today":
-        return today, today
-    if query == "tomorrow":
-        tomorrow = today + timedelta(days=1)
-        return tomorrow, tomorrow
-    if query == "this week":
-        start_of_week = today - timedelta(days=today.weekday())
-        end_of_week = start_of_week + timedelta(days=6)
-        return start_of_week, end_of_week
-    if query == "next week":
-        start_of_next_week = today + timedelta(days=(7 - today.weekday()))
-        end_of_next_week = start_of_next_week + timedelta(days=6)
-        return start_of_next_week, end_of_next_week
+    query_lower = query.strip().lower()
+    if "today" in query_lower: return today, today
+    if "tomorrow" in query_lower: return today + timedelta(days=1), today + timedelta(days=1)
+    if "this week" in query_lower:
+        start = today - timedelta(days=today.weekday())
+        return start, start + timedelta(days=6)
+    if "next week" in query_lower:
+        start = today + timedelta(days=(7 - today.weekday()))
+        return start, start + timedelta(days=6)
     return None
 
 def parse_distance_query(query: str):
-    """
-    Parses natural language distance queries like "within 10 miles of Nashville".
-    Returns a tuple of (distance_in_miles, target_location_coords) or None.
-    """
-    # Regex to find patterns like "10 miles from nashville" or "30 minutes of 37209"
-    pattern = re.compile(r"(\d+)\s*(mile|min|minute|hr|hour)s?\s*(from|of|around)\s*(.*)", re.IGNORECASE)
+    pattern = re.compile(r"(?:(at least|more than|over|greater than)\s*)?(?:(at most|within|less than|under)\s*)?(\d+(?:\.\d+)?)\s*(mile|min|minute|hr|hour)s?\s*(?:from|of|around|near)?\s*(.+)", re.IGNORECASE)
     match = pattern.search(query)
+    if not match: return None
+    min_comp, max_comp, val_str, unit, loc_str = match.groups()
+    dist = float(val_str)
+    if 'min' in unit: dist *= 0.8
+    elif 'hr' in unit: dist *= 45
+    min_dist, max_dist = (dist, None) if min_comp else (None, dist if max_comp else dist)
+    target_coords = get_coords(loc_str)
+    return (max_dist, min_dist, target_coords) if target_coords else None
 
-    if not match:
-        return None
-
-    value, unit, _, location_str = match.groups()
-    distance = float(value)
-    location_str = location_str.strip()
-
-    # Simplistic conversion of time to distance. 
-    # ASSUMPTION: 1 minute of driving = 0.8 miles. This is a huge simplification!
-    if 'min' in unit:
-        distance *= 0.8
-    elif 'h' in unit:
-        distance *= 45 # Assuming ~45 mph average travel speed
-
-    target_coords = get_coords(location_str)
-    if not target_coords:
-        return None # Could not find the location user asked for
-
-    return distance, target_coords
+def parse_time_of_day_query(query: str):
+    """Parses 'morning', 'afternoon', 'evening' and returns a time range."""
+    query_lower = query.lower()
+    if "morning" in query_lower:
+        return time(7, 0), time(12, 0) # 7:00 AM to 12:00 PM
+    if "afternoon" in query_lower:
+        return time(12, 0), time(17, 0) # 12:00 PM to 5:00 PM
+    if "evening" in query_lower:
+        return time(17, 0), time(21, 0) # 5:00 PM to 9:00 PM
+    return None
 
 # --- Main API Endpoint ---
 @app.post("/query_foreclosure_sheet", response_model=list[Property])
 def query_foreclosure_sheet(payload: QueryRequestModel):
-    if not worksheet:
-        return [{"error": "Google Sheet not accessible. Check server logs."}]
+    if not worksheet: return [{"error": "Google Sheet not accessible."}]
 
     query = payload.query.strip()
     data = worksheet.get_all_records()
-    results = []
-
-    # --- Search Logic Priority ---
-    # 1. Try to parse as a distance query first
-    # 2. Then, try to parse as a date query
-    # 3. Finally, fall back to a generic keyword search
-
+    
+    # --- Detect all possible filters in the query ---
     distance_params = parse_distance_query(query)
     date_range = parse_date_query(query)
-
-    if distance_params:
-        # --- 1. GEOGRAPHIC DISTANCE SEARCH ---
-        max_distance_miles, target_coords = distance_params
-        for row in data:
-            address = f"{row.get('PropertyAddress', '')}, {row.get('City', '')}, {row.get('ZipCode', '')}"
-            property_coords = get_coords(address)
-            if property_coords:
-                distance = geodesic(target_coords, property_coords).miles
-                if distance <= max_distance_miles:
-                    results.append(row)
-
-    elif date_range:
-        # --- 2. DATE-BASED SEARCH ---
-        start_date, end_date = date_range
-        for row in data:
-            sale_date_str = row.get("SaleDate")
-            if not sale_date_str: continue
-            try:
-                sale_date = datetime.strptime(sale_date_str, "%m/%d/%Y").date()
-                if start_date <= sale_date <= end_date:
-                    results.append(row)
-            except (ValueError, TypeError):
-                continue
+    time_range = parse_time_of_day_query(query)
+    # Simple keywords are what's left after removing common filter words
+    keywords = re.sub(r'(in|for|at|the|a|are|that|show|me|give|find|listings|properties|list|homes|sale)', '', query, flags=re.I).split()
     
-    else:
-        # --- 3. GENERAL KEYWORD SEARCH (Fallback) ---
-        query_lower = query.lower()
-        for row in data:
-            row_text = " ".join([str(v).strip().lower() for v in row.values()])
-            if query_lower in row_text:
-                results.append(row)
+    results = []
+    for row in data:
+        # --- Assume row is a match until a filter fails ---
+        is_match = True
+        
+        # 1. Apply Distance Filter
+        if distance_params:
+            max_dist, min_dist, target_coords = distance_params
+            address = f"{row.get('PropertyAddress', '')}, {row.get('City', '')}, {row.get('ZipCode', '')}"
+            prop_coords = get_coords(address, row_context=row)
+            if not prop_coords:
+                is_match = False
+            else:
+                dist = geodesic(target_coords, prop_coords).miles
+                if max_dist is not None and dist > max_dist: is_match = False
+                if min_dist is not None and dist < min_dist: is_match = False
 
-    # Format results to match Pydantic model
-    formatted_results = [
-        {
-            "PropertyAddress": str(row.get("PropertyAddress", "")),
-            "SaleDate": str(row.get("SaleDate", "")),
-            "SaleTime": str(row.get("SaleTime", "")),
-            "City": str(row.get("City", "")),
-            "County": str(row.get("County", "")),
-            "ZipCode": str(row.get("ZipCode", "")),
-            "Source": str(row.get("Source", "")),
-        }
-        for row in results
-    ]
+        # 2. Apply Date Filter (if still a match)
+        if is_match and date_range:
+            sale_date_str = row.get("SaleDate")
+            if not sale_date_str: is_match = False
+            else:
+                try:
+                    sale_date = datetime.strptime(sale_date_str, "%m/%d/%Y").date()
+                    if not (date_range[0] <= sale_date <= date_range[1]): is_match = False
+                except (ValueError, TypeError): is_match = False
 
-    return formatted_results
+        # 3. Apply Time of Day Filter (if still a match)
+        if is_match and time_range:
+            sale_time_str = row.get("SaleTime")
+            if not sale_time_str: is_match = False
+            else:
+                try:
+                    # Handles formats like "10:00 AM" or "1:30 PM"
+                    sale_time = datetime.strptime(sale_time_str, "%I:%M %p").time()
+                    if not (time_range[0] <= sale_time <= time_range[1]): is_match = False
+                except (ValueError, TypeError): is_match = False
+
+        # 4. Apply Keyword Filter (if still a match)
+        if is_match and keywords:
+             row_text = " ".join([str(v).strip().lower() for v in row.values()])
+             if not all(kw.lower() in row_text for kw in keywords):
+                 is_match = False
+
+        # If all checks passed, add to results
+        if is_match:
+            results.append(row)
+
+    return [Property(**row) for row in results]
