@@ -44,3 +44,7 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
             results.append(row)  # Return full row
 
     return results
+
+@app.get("/ping")
+def ping():
+    return {"status": "alive"}
