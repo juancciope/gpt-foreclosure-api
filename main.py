@@ -1,13 +1,55 @@
-
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime, timedelta
+import math
+from geopy.distance import geodesic
+
+# Google Sheets authentication
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+gc = gspread.authorize(creds)
+
+# Sheet setup
+SHEET_NAME = "Foreclosure Deals"
+WORKSHEET_NAME = "Sheet1"
+
+worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
+
+# Load worksheet values
+records = worksheet.get_all_records()
+
+# Static coordinates for reference points
+REFERENCE_POINTS = {
+    "Mt. Juliet": (36.2006, -86.5186),
+    "Nashville": (36.1627, -86.7816),
+}
+
+
+def calculate_drive_time(address: str, reference_coords: tuple) -> float:
+    # In real implementation, you'd use Google Maps API
+    # Here we simulate drive time as 1.3x straight-line distance (in miles) converted to minutes
+    try:
+        from geopy.geocoders import Nominatim
+        geolocator = Nominatim(user_agent="foreclosure-finder")
+        location = geolocator.geocode(address)
+        if location:
+            address_coords = (location.latitude, location.longitude)
+            miles = geodesic(reference_coords, address_coords).miles
+            return round(miles * 1.3)  # Approximate drive time in minutes
+        else:
+            return math.inf
+    except Exception:
+        return math.inf
+
 
 app = FastAPI()
 
-# CORS (allow GPT to call the endpoint)
+# Allow requests from any origin (CORS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,51 +57,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Google Sheets authentication
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-gc = gspread.authorize(creds)
-SHEET_NAME = 'Foreclosure Deals'
-WORKSHEET_NAME = 'Sheet1'
 
 @app.get("/get_properties")
-def get_properties(location: str = Query(...), max_drive_time: int = Query(...)):
-    worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-    rows = worksheet.get_all_records()
+def get_properties(
+    location: str = Query(..., description="City name (e.g., 'Mt. Juliet')"),
+    max_drive_time: int = Query(..., description="Maximum drive time in minutes")
+) -> List[dict]:
+    if location not in REFERENCE_POINTS:
+        return {"error": f"Location '{location}' is not supported."}
 
-    today = datetime.today()
-    start_week = today - timedelta(days=today.weekday())
-    end_week = start_week + timedelta(days=6)
+    reference_coords = REFERENCE_POINTS[location]
+    filtered_properties = []
 
-    results = []
-    for row in rows:
-        sale_date_str = row.get("SaleDate", "")
-        if not sale_date_str:
-            continue
-        try:
-            sale_date = datetime.strptime(sale_date_str.strip(), "%m/%d/%Y")
-        except:
+    for row in records:
+        address = row.get("Property Address")
+        if not address:
             continue
 
-        if not (start_week <= sale_date <= end_week):
-            continue
-
-        drive_key = "DriveTimeToMtJuliet" if "juliet" in location.lower() else "DriveTimeToNashville"
-        try:
-            drive_time = int(str(row.get(drive_key, "")).strip())
-        except:
-            continue
-
+        drive_time = calculate_drive_time(address, reference_coords)
         if drive_time <= max_drive_time:
-            results.append({
-                "PropertyAddress": row.get("PropertyAddress"),
-                "SaleDate": row.get("SaleDate"),
-                "SaleTime": row.get("SaleTime"),
-                "City": row.get("City"),
-                "County": row.get("County"),
-                "ZipCode": row.get("ZipCode"),
-                "DriveTime": drive_time,
-                "Source": row.get("Source")
-            })
+            row["Drive Time (min)"] = drive_time
+            filtered_properties.append(row)
 
-    return {"results": results[:10]}
+    return filtered_properties
