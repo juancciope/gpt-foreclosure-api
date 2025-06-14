@@ -6,7 +6,7 @@ from google.oauth2.service_account import Credentials
 
 app = FastAPI()
 
-# CORS (so GPT can call it)
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,11 +18,11 @@ app.add_middleware(
 # Google Sheets setup
 SHEET_NAME = "Foreclosure Deals"
 WORKSHEET_NAME = "Sheet1"
-CREDENTIALS_FILE = "credentials2.json"  # Update if renamed
+CREDENTIALS_FILE = "credentials2.json"  # Your renamed credentials
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = Credentials.from_service_account_file("credentials2.json", scopes=scope)
-gc = gspread.authorize(creds)
+credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+gc = gspread.authorize(credentials)
 
 # Request model
 class QueryRequestModel(BaseModel):
@@ -40,7 +40,6 @@ class Property(BaseModel):
 def query_foreclosure_sheet(payload: QueryRequestModel):
     query = payload.query.lower()
     
-    # Load the sheet
     worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
     data = worksheet.get_all_records()
 
@@ -56,4 +55,4 @@ def query_foreclosure_sheet(payload: QueryRequestModel):
                 "price": row.get("Price", ""),
             })
 
-    return results  # Always return a list, even if empty
+    return results
