@@ -1,12 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
-# Allow CORS so GPT or other apps can query it
+# CORS (allows access from GPT and other frontends)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,7 +30,7 @@ gc = gspread.authorize(creds)
 class QueryRequestModel(BaseModel):
     query: str
 
-# Response model (matching actual column names)
+# Response model (based on your sheet structure)
 class Property(BaseModel):
     PropertyAddress: str
     SaleDate: str
@@ -38,25 +40,47 @@ class Property(BaseModel):
     ZipCode: str
     Source: str
 
-@app.post("/query_foreclosure_sheet", response_model=list[Property])
+@app.post("/query_foreclosure_sheet", response_model=List[Property])
 def query_foreclosure_sheet(payload: QueryRequestModel):
     query = payload.query.lower()
-
+    today = datetime.today()
+    
+    # Load sheet data
     worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
     data = worksheet.get_all_records()
 
+    # Prepare date filters
+    next_week = False
+    next_monday = next_sunday = None
+
+    if "next week" in query:
+        next_week = True
+        next_monday = today + timedelta(days=-today.weekday() + 7)
+        next_sunday = next_monday + timedelta(days=6)
+
     results = []
     for row in data:
-        row_text = " ".join([str(v).lower() for v in row.values()])
-        if query in row_text:
-            results.append({
-                "PropertyAddress": str(row["PropertyAddress"]) if row.get("PropertyAddress") else "",
-                "SaleDate": str(row["SaleDate"]) if row.get("SaleDate") else "",
-                "SaleTime": str(row["SaleTime"]) if row.get("SaleTime") else "",
-                "City": str(row["City"]) if row.get("City") else "",
-                "County": str(row["County"]) if row.get("County") else "",
-                "ZipCode": str(row["ZipCode"]) if row.get("ZipCode") else "",
-                "Source": str(row["Source"]) if row.get("Source") else "",
-            })
+        try:
+            # Normalize all fields
+            row_normalized = {k: str(v).strip() for k, v in row.items()}
+            row_text = " ".join(v.lower() for v in row_normalized.values())
+
+            # If query says "next week", filter by date
+            if next_week:
+                sale_date_str = row_normalized.get("SaleDate", "")
+                if not sale_date_str:
+                    continue
+                try:
+                    sale_date = datetime.strptime(sale_date_str, "%m/%d/%Y")
+                    if next_monday <= sale_date <= next_sunday:
+                        results.append(Property(**row_normalized))
+                except ValueError:
+                    continue
+            else:
+                if query in row_text:
+                    results.append(Property(**row_normalized))
+
+        except Exception as e:
+            continue  # silently skip bad rows
 
     return results
