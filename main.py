@@ -3,10 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import gspread
 from google.oauth2.service_account import Credentials
-import re
+from typing import List
 
 app = FastAPI()
 
+# CORS middleware to allow requests from anywhere
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,40 +16,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Google Sheets setup
 SHEET_NAME = "Foreclosure Deals"
 WORKSHEET_NAME = "Sheet1"
 CREDENTIALS_FILE = "credentials2.json"
 
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
 creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
 gc = gspread.authorize(creds)
+worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
 
+data = worksheet.get_all_records()
+
+# Request model
 class QueryRequestModel(BaseModel):
     query: str
 
-@app.post("/query_foreclosure_sheet")
+# Response model
+class Property(BaseModel):
+    PropertyAddress: str
+    SaleDate: str
+    SaleTime: str
+    City: str
+    County: str
+    ZipCode: str
+    Source: str
+    DriveTimeToNashville: str
+    DriveTimeToMtJuliet: str
+
+@app.post("/query_foreclosure_sheet", response_model=List[Property])
 def query_foreclosure_sheet(payload: QueryRequestModel):
-    query = payload.query.lower().strip()
-    worksheet = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-    data = worksheet.get_all_records()
+    query = payload.query.lower()
 
     results = []
     for row in data:
-        # Normalize and join all row values for fuzzy matching
-        row_text = " ".join([str(v).lower().strip() for v in row.values() if v])
-
-        if query in row_text or query == "":
-            result = {
-                "address": row.get("Address", "Unknown"),
-                "city": row.get("City", "Unknown"),
-                "state": row.get("State", ""),
-                "zip_code": str(row.get("Zip Code", "")),
-                "price": row.get("Price", "N/A"),
-                "sale_date": row.get("Sale Date", "N/A")
-            }
-            results.append(result)
-
-    if not results:
-        return [{"address": "No matches found", "city": "", "state": "", "zip_code": "", "price": "", "sale_date": ""}]
+        row_text = " ".join([str(v).lower() for v in row.values()])
+        if query in row_text:
+            results.append({
+                "PropertyAddress": row.get("PropertyAddress", ""),
+                "SaleDate": row.get("SaleDate", ""),
+                "SaleTime": row.get("SaleTime", ""),
+                "City": row.get("City", ""),
+                "County": row.get("County", ""),
+                "ZipCode": row.get("ZipCode", ""),
+                "Source": row.get("Source", ""),
+                "DriveTimeToNashville": row.get("DriveTimeToNashville", ""),
+                "DriveTimeToMtJuliet": row.get("DriveTimeToMtJuliet", ""),
+            })
 
     return results
