@@ -21,7 +21,7 @@ WORKSHEET_NAME = "Sheet1"
 CREDENTIALS_FILE = "credentials2.json"  # Update if renamed
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials = Credentials.from_service_account_file("credentials2.json", scopes=scope)
+creds = Credentials.from_service_account_file("credentials2.json", scopes=scope)
 gc = gspread.authorize(creds)
 
 # Request model
